@@ -5,92 +5,88 @@ using System.Text;
 
 namespace Miracast.Receiver.Linux;
 
-internal sealed class WfdRtspServer : IAsyncDisposable
+// A WFD sink opens the RTSP control connection to the source, which listens on
+// the port it advertises in its WFD IEs.
+internal sealed class WfdRtspClient(
+    Action<string> log,
+    Action connected,
+    Action disconnected,
+    Action<int, int> videoReady) : IAsyncDisposable
 {
-    private readonly TcpListener _listener = new(IPAddress.Any, MiracastReceiverService.RtspPort);
-    private readonly Action<string> _log;
-    private readonly Action _connected;
-    private readonly Action _disconnected;
-    private readonly Action<int, int> _videoReady;
     private readonly CancellationTokenSource _stopping = new();
-    private Task? _acceptLoop;
     private TcpClient? _client;
+    private Task? _session;
 
-    public WfdRtspServer(
-        Action<string> log,
-        Action connected,
-        Action disconnected,
-        Action<int, int> videoReady)
+    public void Connect(IPAddress source, int port)
     {
-        _log = log;
-        _connected = connected;
-        _disconnected = disconnected;
-        _videoReady = videoReady;
+        Close();
+        _session = RunAsync(new IPEndPoint(source, port), _stopping.Token);
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        _listener.Start(1);
-        _acceptLoop = AcceptLoopAsync(_stopping.Token);
-        _log($"WFD RTSP sink is listening on TCP {MiracastReceiverService.RtspPort}.");
-        return Task.CompletedTask;
-    }
+    public void Close() => Interlocked.Exchange(ref _client, null)?.Dispose();
 
-    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
+    private async Task RunAsync(IPEndPoint source, CancellationToken cancellationToken)
     {
+        TcpClient? client = null;
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var client = await _listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
-                var previous = Interlocked.Exchange(ref _client, client);
-                previous?.Dispose();
-                try
-                {
-                    await RunSessionAsync(client, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                }
-                catch (Exception exception)
-                {
-                    _log($"WFD RTSP session failed: {exception.Message}");
-                }
-                finally
-                {
-                    if (ReferenceEquals(Interlocked.CompareExchange(ref _client, null, client), client))
-                        client.Dispose();
-                    _disconnected();
-                }
-            }
+            client = await ConnectWithRetryAsync(source, cancellationToken).ConfigureAwait(false);
+            Interlocked.Exchange(ref _client, client)?.Dispose();
+            log($"WFD RTSP connected to source {source}.");
+            var session = new WfdRtspSession(client.GetStream(), log, connected, videoReady);
+            await session.RunAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+        catch (ObjectDisposedException)
         {
+        }
+        catch (Exception exception)
+        {
+            log($"WFD RTSP session failed: {exception.Message}");
+        }
+        finally
+        {
+            if (client is not null
+                && ReferenceEquals(Interlocked.CompareExchange(ref _client, null, client), client))
+                client.Dispose();
+            disconnected();
         }
     }
 
-    private async Task RunSessionAsync(TcpClient client, CancellationToken cancellationToken)
+    // The source may open its RTSP port a moment after the P2P link comes up.
+    private static async Task<TcpClient> ConnectWithRetryAsync(
+        IPEndPoint source,
+        CancellationToken cancellationToken)
     {
-        client.NoDelay = true;
-        var session = new WfdRtspSession(
-            client.GetStream(),
-            _log,
-            _connected,
-            _videoReady);
-        await session.RunAsync(cancellationToken).ConfigureAwait(false);
+        for (var attempt = 1; ; attempt++)
+        {
+            var client = new TcpClient { NoDelay = true };
+            try
+            {
+                await client.ConnectAsync(source, cancellationToken).ConfigureAwait(false);
+                return client;
+            }
+            catch (SocketException) when (attempt < 10)
+            {
+                client.Dispose();
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         _stopping.Cancel();
-        _listener.Stop();
-        Interlocked.Exchange(ref _client, null)?.Dispose();
-        if (_acceptLoop is not null)
-            await _acceptLoop.ConfigureAwait(false);
+        Close();
+        if (_session is not null)
+            await _session.ConfigureAwait(false);
         _stopping.Dispose();
     }
 }

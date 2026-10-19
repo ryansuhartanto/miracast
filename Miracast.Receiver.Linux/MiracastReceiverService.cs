@@ -11,11 +11,13 @@ public sealed class MiracastReceiverService : IMiracastReceiverService, IAsyncDi
 
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private WpaSupplicantP2pController? _p2pController;
-    private WfdRtspServer? _rtspServer;
+    private WfdRtspClient? _rtspClient;
+    private NetworkManagerP2pConfigurator? _networkManager;
     private CancellationTokenSource? _running;
     private string? _wifiInterface;
     private int _connectionAnnounced;
     private int _videoAnnounced;
+    private int _connecting;
     private bool _started;
 
     public event EventHandler<ConnectionCreatedEventArgs>? ConnectionCreated;
@@ -40,12 +42,12 @@ public sealed class MiracastReceiverService : IMiracastReceiverService, IAsyncDi
             var friendlyName = GetFriendlyName();
             _running = new CancellationTokenSource();
 
-            _rtspServer = new WfdRtspServer(
+            _rtspClient = new WfdRtspClient(
                 Log,
                 AnnounceConnection,
                 AnnounceDisconnection,
                 AnnounceVideo);
-            await _rtspServer.StartAsync(cancellationToken).ConfigureAwait(false);
+            _networkManager = new NetworkManagerP2pConfigurator(Log);
 
             _p2pController = new WpaSupplicantP2pController(
                 _wifiInterface,
@@ -87,28 +89,62 @@ public sealed class MiracastReceiverService : IMiracastReceiverService, IAsyncDi
     {
         var controller = _p2pController
                          ?? throw new InvalidOperationException("The P2P controller is not running.");
+        var networkManager = _networkManager
+                             ?? throw new InvalidOperationException("The receiver is not running.");
         var address = await controller.GetPeerAddressAsync(peerPath).ConfigureAwait(false);
-        Log($"Authorizing PBC request from {address}.");
-        await controller.AuthorizePeerAsync(peerPath).ConfigureAwait(false);
+
+        // Sources follow provision discovery with a GO negotiation request; both
+        // arrive while the first connection attempt is still activating.
+        if (Interlocked.Exchange(ref _connecting, 1) == 1)
+            return;
+        try
+        {
+            Log($"Connecting to Miracast source {address}.");
+            await networkManager.ConnectAsync(
+                    address,
+                    WpaSupplicantP2pController.SinkWfdInformationElements,
+                    _running?.Token ?? CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _connecting, 0);
+        }
     }
 
     private async Task ConfigureGroupAsync(P2pGroup group)
     {
         var controller = _p2pController
                          ?? throw new InvalidOperationException("The P2P controller is not running.");
+        var networkManager = _networkManager
+                             ?? throw new InvalidOperationException("The receiver is not running.");
         var groupInterface = await controller.GetInterfaceNameAsync(group.InterfacePath).ConfigureAwait(false);
         Log($"P2P group started on {groupInterface}; role: {group.Role}.");
 
-        var cancellationToken = _running?.Token ?? CancellationToken.None;
-        var configurator = new NetworkManagerP2pConfigurator(Log);
-        await configurator.EnsureAddressAsync(groupInterface, group.Role, cancellationToken).ConfigureAwait(false);
+        var source = await networkManager.WaitForSourceAddressAsync(
+                $"p2p-dev-{_wifiInterface}",
+                groupInterface,
+                group.Role,
+                _running?.Token ?? CancellationToken.None)
+            .ConfigureAwait(false);
+        // ponytail: assumes the source's RTSP port is the default 7236; read it from
+        // the source's WFD IEs if a source advertises another one.
+        _rtspClient?.Connect(source, RtspPort);
     }
 
-    private Task GroupFinishedAsync()
+    private async Task GroupFinishedAsync()
     {
         Log("P2P group finished.");
+        _rtspClient?.Close();
         AnnounceDisconnection();
-        return Task.CompletedTask;
+
+        // NetworkManager clears the global WFD IEs when its P2P connection ends,
+        // which hides this sink from sources.
+        // ponytail: fixed delay to land after NetworkManager's reset; watch its
+        // device state instead if the race shows up.
+        await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        if (_p2pController is { } controller)
+            await controller.ApplySinkWfdIesAsync().ConfigureAwait(false);
     }
 
     private void AnnounceConnection()
@@ -150,12 +186,16 @@ public sealed class MiracastReceiverService : IMiracastReceiverService, IAsyncDi
         }
         finally
         {
-            var rtspServer = _rtspServer;
-            _rtspServer = null;
+            var rtspClient = _rtspClient;
+            _rtspClient = null;
+            var networkManager = _networkManager;
+            _networkManager = null;
             try
             {
-                if (rtspServer is not null)
-                    await rtspServer.DisposeAsync().ConfigureAwait(false);
+                if (rtspClient is not null)
+                    await rtspClient.DisposeAsync().ConfigureAwait(false);
+                if (networkManager is not null)
+                    await networkManager.DeleteConnectionAsync().ConfigureAwait(false);
             }
             finally
             {

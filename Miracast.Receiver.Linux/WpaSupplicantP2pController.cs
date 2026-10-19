@@ -26,6 +26,8 @@ internal sealed class WpaSupplicantP2pController : IAsyncDisposable
     private IWpaSupplicant? _supplicant;
     private IWpaP2pDevice? _p2pDevice;
     private byte[]? _previousWfdIes;
+    private IWpaWps? _wps;
+    private string? _previousConfigMethods;
     private bool _extendedListenStarted;
     private bool _findStarted;
 
@@ -68,6 +70,13 @@ internal sealed class WpaSupplicantP2pController : IAsyncDisposable
 
         _previousWfdIes = await _supplicant.GetAsync<byte[]>("WFDIEs").ConfigureAwait(false);
         await _supplicant.SetAsync("WFDIEs", SinkWfdInformationElements).ConfigureAwait(false);
+
+        // wpa_supplicant's default config methods omit push-button, which makes
+        // Android sources fall back to PIN entry.
+        _wps = _connection.CreateProxy<IWpaWps>(Service, interfacePath);
+        _previousConfigMethods = await _wps.GetAsync<string>("ConfigMethods").ConfigureAwait(false);
+        await _wps.SetAsync("ConfigMethods", "virtual_push_button push_button display keypad")
+            .ConfigureAwait(false);
 
         _p2pDevice = _connection.CreateProxy<IWpaP2pDevice>(Service, interfacePath);
         await _p2pDevice.SetAsync(
@@ -128,19 +137,11 @@ internal sealed class WpaSupplicantP2pController : IAsyncDisposable
         return @interface.GetAsync<string>("Ifname");
     }
 
-    public async Task AuthorizePeerAsync(ObjectPath peerPath)
+    public Task ApplySinkWfdIesAsync()
     {
-        var p2pDevice = _p2pDevice
-                        ?? throw new InvalidOperationException("The P2P controller is not running.");
-        await p2pDevice.ConnectAsync(
-            new Dictionary<string, object>
-            {
-                ["peer"] = peerPath,
-                ["persistent"] = false,
-                ["authorize_only"] = true,
-                ["go_intent"] = 0,
-                ["wps_method"] = "pbc",
-            }).ConfigureAwait(false);
+        var supplicant = _supplicant
+                         ?? throw new InvalidOperationException("The P2P controller is not running.");
+        return supplicant.SetAsync("WFDIEs", SinkWfdInformationElements);
     }
 
     private async void RunSignalHandlerAsync(Func<Task> action, string operation)
@@ -190,6 +191,21 @@ internal sealed class WpaSupplicantP2pController : IAsyncDisposable
             _p2pDevice = null;
         }
 
+        if (_wps is not null && _previousConfigMethods is not null)
+        {
+            try
+            {
+                await _wps.SetAsync("ConfigMethods", _previousConfigMethods).ConfigureAwait(false);
+            }
+            catch (DBusException exception)
+            {
+                _log($"Could not restore wpa_supplicant WPS config methods: {exception.Message}");
+            }
+        }
+
+        _wps = null;
+        _previousConfigMethods = null;
+
         if (_supplicant is not null && _previousWfdIes is not null)
         {
             try
@@ -236,7 +252,6 @@ internal interface IWpaP2pDevice : IDBusObject
     Task FindAsync(IDictionary<string, object> arguments);
     Task StopFindAsync();
     Task ExtendedListenAsync(IDictionary<string, object> arguments);
-    Task<string> ConnectAsync(IDictionary<string, object> arguments);
     Task<T> GetAsync<T>(string property);
     Task SetAsync(string property, object value);
     Task<IDisposable> WatchProvisionDiscoveryPBCRequestAsync(
@@ -251,6 +266,13 @@ internal interface IWpaP2pDevice : IDBusObject
     Task<IDisposable> WatchGroupFinishedAsync(
         Action<IDictionary<string, object>> handler,
         Action<Exception>? onError = null);
+}
+
+[DBusInterface("fi.w1.wpa_supplicant1.Interface.WPS")]
+internal interface IWpaWps : IDBusObject
+{
+    Task<T> GetAsync<T>(string property);
+    Task SetAsync(string property, object value);
 }
 
 [DBusInterface("fi.w1.wpa_supplicant1.Peer")]
