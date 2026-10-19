@@ -99,8 +99,8 @@ internal sealed class WpaSupplicantP2pController : IAsyncDisposable
         await _p2pDevice.ExtendedListenAsync(
             new Dictionary<string, object>
             {
-                ["period"] = 500u,
-                ["interval"] = 500u,
+                ["period"] = 500,
+                ["interval"] = 500,
             }).ConfigureAwait(false);
         _extendedListenStarted = true;
         await _p2pDevice.FindAsync(
