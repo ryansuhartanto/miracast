@@ -161,7 +161,7 @@ public sealed class MiracastReceiverService : IMiracastReceiverService, IAsyncDi
 
         VideoReceived?.Invoke(this, new VideoReceivedEventArgs
         {
-            Source = new VideoSource(new Uri($"rtp://@0.0.0.0:{RtpPort}"), width, height),
+            Source = new VideoSource(new Uri($"rtp://0.0.0.0:{RtpPort}"), width, height),
         });
     }
 

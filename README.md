@@ -3,7 +3,7 @@
 A minimal Avalonia receiver with two platform backends:
 
 - Windows 10 1903 or newer: `Windows.Media.Miracast` receives the connection and the Windows media frame server copies video into an Avalonia `WriteableBitmap`.
-- Linux: the receiver uses the system `wpa_supplicant` over D-Bus for Wi-Fi Direct and implements WFD/RTSP negotiation itself; LibVLC receives the MPEG-TS/RTP stream on UDP port `7236` and renders it inside the Avalonia window.
+- Linux: the receiver uses the system `wpa_supplicant` over D-Bus for Wi-Fi Direct and implements WFD/RTSP negotiation itself; `ffmpeg` receives the MPEG-TS/RTP stream on UDP port `7236`, decodes it with low latency and plays its audio through PulseAudio/PipeWire, and the video renders inside the Avalonia window.
 
 ## Build and run
 
@@ -32,7 +32,7 @@ The host must provide:
 - `nmcli` (NetworkManager CLI);
 - a system `wpa_supplicant` built with D-Bus and P2P support and controlled by NetworkManager;
 - a Wi-Fi adapter/driver that supports P2P; concurrent infrastructure/P2P support is required when the same adapter must retain its normal network connection;
-- LibVLC (`libvlc`) with its plugins; decoded BGRA frames are copied into the same Avalonia `WriteableBitmap` path used on Windows.
+- `ffmpeg` with H.264 decoding and PulseAudio output; decoded BGRA frames are copied into the same Avalonia `WriteableBitmap` path used on Windows.
 
 The desktop user must be allowed by the machine's D-Bus/polkit policy to use the `fi.w1.wpa_supplicant1` P2P API and configure the P2P group interface through NetworkManager. Open TCP and UDP port `7236` in the local firewall.
 

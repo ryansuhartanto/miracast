@@ -98,7 +98,8 @@ internal sealed class WfdRtspSession(
     Action<int, int> videoReady)
 {
     private static readonly string CapabilityBody =
-        "wfd_audio_codecs: LPCM 00000002 00\r\n" +
+        // AAC 48 kHz stereo only: ffmpeg cannot identify WFD LPCM (TS stream type 0x83).
+        "wfd_audio_codecs: AAC 00000001 00\r\n" +
         "wfd_video_formats: 00 00 02 10 0001FFFF 1FFFFFFF 00000FFF 00 0000 0000 00 none none\r\n" +
         $"wfd_client_rtp_ports: RTP/AVP/UDP;unicast {MiracastReceiverService.RtpPort} 0 mode=play\r\n" +
         "wfd_content_protection: none\r\n" +
@@ -210,7 +211,36 @@ internal sealed class WfdRtspSession(
         }
 
         if (pendingMethod == "PLAY" && !_videoAnnounced)
+        {
             AnnounceVideo();
+            _ = RequestIdrAsync(cancellationToken);
+        }
+    }
+
+    // The renderer starts after PLAY and misses the SPS/PPS sent with the stream's
+    // first IDR frame, so ask the source for a new one once the renderer listens.
+    // ponytail: fixed 1 s wait for the renderer; have it signal readiness if a
+    // slower machine still misses the IDR frame.
+    private async Task RequestIdrAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            var headers = new Dictionary<string, string>();
+            if (_sessionId is not null)
+                headers["Session"] = _sessionId;
+            await SendRequestAsync(
+                    "SET_PARAMETER",
+                    "rtsp://localhost/wfd1.0",
+                    headers,
+                    "wfd_idr_request\r\n",
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or IOException
+                                              or ObjectDisposedException)
+        {
+        }
     }
 
     private async Task SendSetupAsync(CancellationToken cancellationToken)
@@ -317,7 +347,7 @@ internal sealed class WfdRtspSession(
         string? body,
         CancellationToken cancellationToken)
     {
-        var cseq = _nextCSeq++;
+        var cseq = Interlocked.Increment(ref _nextCSeq) - 1;
         var requestHeaders = new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase)
         {
             ["CSeq"] = cseq.ToString(CultureInfo.InvariantCulture),
