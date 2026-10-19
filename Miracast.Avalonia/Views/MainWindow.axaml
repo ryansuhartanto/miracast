@@ -21,7 +21,8 @@
     <Grid Background="Black">
         <Image x:Name="FrameImage" Stretch="Uniform" />
 
-        <Border VerticalAlignment="Bottom"
+        <Border x:Name="StatusBar"
+                VerticalAlignment="Bottom"
                 Background="#B0000000"
                 Padding="16,10">
             <TextBlock Text="{Binding Status}"

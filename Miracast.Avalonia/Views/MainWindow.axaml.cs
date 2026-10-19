@@ -73,7 +73,7 @@ public partial class MainWindow : Window
         try
         {
             await _videoRenderer.PlayAsync(args.Source, _lifetime.Token);
-            SetStatus("Streaming");
+            SetStatus("Streaming", autoHide: true);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -125,8 +125,18 @@ public partial class MainWindow : Window
 
     private Task StopPlaybackAsync() => _videoRenderer.StopAsync();
 
-    private void SetStatus(string status) =>
-        Dispatcher.UIThread.Post(() => ViewModel.Status = status);
+    private void SetStatus(string status, bool autoHide = false) =>
+        Dispatcher.UIThread.Post(() =>
+        {
+            ViewModel.Status = status;
+            StatusBar.IsVisible = true;
+            if (autoHide)
+            {
+                DispatcherTimer.RunOnce(
+                    () => StatusBar.IsVisible = ViewModel.Status != status,
+                    TimeSpan.FromSeconds(5));
+            }
+        });
 
     private async void OnClosing(object? sender, WindowClosingEventArgs args)
     {
